@@ -1,9 +1,11 @@
 """Evidence parsing tests, including the text resource-recall guard."""
 
 import collections
+import json
+import re
 import sys
 import unittest
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -11,7 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "code"))
 
 from audit.evidence import parse_all_evidence  # noqa: E402
-from audit.evidence.common import RESOURCE_ID_RE  # noqa: E402
+from audit.evidence.common import EMAIL_RE, HASH_RE, PHONE_RE, RESOURCE_ID_RE, USER_ID_RE  # noqa: E402
 from audit.evidence.log_parser import _decode_line, _key_value_fields  # noqa: E402
 from audit.paths import DATASET_DIR  # noqa: E402
 
@@ -172,6 +174,155 @@ class TestEvidenceParsing(unittest.TestCase):
                 for item in flow
             )
         )
+
+    def test_nested_message_payload_and_request_id_join(self) -> None:
+        file_path = "evidence/logs/cloud_runtime_export_us_west_20260608.log"
+        account = self._observations(file_path, "account_4331")
+        self.assertTrue(
+            any(
+                "cchukwu7021@gmail.com" in item.identifiers
+                and dict(item.attributes).get("http_status") == "404"
+                for item in account
+            )
+        )
+        self.assertFalse(
+            any(not item.system_id for item in self.by_path[file_path].observations),
+            "nested function/service values should populate canonical system_id",
+        )
+
+    def test_support_attachment_records_are_typed_separately(self) -> None:
+        expected = (
+            ("evidence/logs/service_events_ap_south_20260915.log", "support_9538", "SUPPORT_ATTACHMENT"),
+            ("evidence/records/customer_data_snapshot_bundle_20260819.json", "support_2315", "SUPPORT_ATTACHMENT"),
+            ("evidence/records/customer_data_snapshot_bundle_20260917.json", "support_1034", "SUPPORT_MESSAGE"),
+        )
+        for file_path, resource_id, record_type in expected:
+            with self.subTest(file_path=file_path, resource_id=resource_id):
+                observations = self._observations(file_path, resource_id)
+                self.assertTrue(observations)
+                self.assertTrue(all(item.record_type == record_type for item in observations))
+
+    def test_replica_and_component_system_aliases_are_canonical(self) -> None:
+        support_log = self.by_path["evidence/logs/support_replica.log"]
+        self.assertTrue(support_log.observations)
+        self.assertTrue(all(item.system_id == "support_platform" for item in support_log.observations))
+        self.assertTrue(any(item.container == "support_replica" for item in support_log.observations))
+        self.assertTrue(any(item.container == "attachment_preview" for item in support_log.observations))
+        self.assertTrue(
+            all(not item.system_id.casefold().endswith("_replica") for item in self.corpus.observations),
+            "replica names belong in container, not system_id",
+        )
+
+    def test_identifiers_are_clean_and_pdf_time_uses_file_capture(self) -> None:
+        sentinels = {
+            "",
+            "no direct identifier",
+            "null",
+            "none",
+            "[redacted]",
+            "compliance journal",
+        }
+        invalid = []
+        name_keys = {"name", "full_name", "display_name", "requester_name", "customer_name"}
+        for item in self.corpus.observations:
+            attributes = dict(item.attributes)
+            explicit_names = set()
+
+            def collect_names(value):
+                if isinstance(value, dict):
+                    for key, child in value.items():
+                        if str(key).casefold() in name_keys and isinstance(child, str):
+                            explicit_names.add(child.strip())
+                        collect_names(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        collect_names(child)
+                elif isinstance(value, str) and value[:1] in {"{", "["}:
+                    try:
+                        collect_names(json.loads(value))
+                    except json.JSONDecodeError:
+                        pass
+
+            collect_names(attributes)
+            for identifier in item.identifiers:
+                lowered = identifier.strip().casefold()
+                phone_digits = re.sub(r"\D", "", identifier)
+                valid_phone = bool(PHONE_RE.fullmatch(identifier)) or (
+                    identifier.strip() == identifier
+                    and identifier not in explicit_names
+                    and 7 <= len(phone_digits) <= 15
+                    and bool(re.search(r"[+() ./-]", identifier))
+                )
+                if (
+                    "\n" in identifier
+                    or "\r" in identifier
+                    or lowered in sentinels
+                    or "compliance journal" in lowered
+                    or (
+                        not (
+                            EMAIL_RE.fullmatch(identifier)
+                            or USER_ID_RE.fullmatch(identifier)
+                            or HASH_RE.fullmatch(identifier)
+                            or valid_phone
+                        )
+                        and identifier not in explicit_names
+                    )
+                ):
+                    invalid.append((item.file_id, item.locator, identifier))
+        self.assertEqual(invalid, [], f"invalid identifiers found: {invalid}")
+
+        report = self.by_path["evidence/documents/account_history_report_20260718.pdf"]
+        expected = datetime(2026, 7, 18, 11, tzinfo=timezone.utc)
+        self.assertTrue(report.observations)
+        self.assertTrue(all(item.observed_at == expected for item in report.observations))
+
+    def test_every_log_trace_joined_key_reaches_resource_observations(self) -> None:
+        violations = []
+        for report in self.corpus.files:
+            if report.format != "LOG":
+                continue
+            raw_text = (DATASET_DIR / report.file_path).read_text(encoding="utf-8-sig")
+            starts = collections.defaultdict(set)
+            parsed_lines = {}
+            for line_number, line in enumerate(raw_text.splitlines(), start=1):
+                fields, _, _ = _decode_line(line)
+                nested = fields.get("message")
+                if isinstance(nested, str):
+                    fields.update({key: value for key, value in _key_value_fields(nested).items() if key not in fields})
+                trace = fields.get("trace_id") or fields.get("requestId") or fields.get("request_id")
+                event = str(fields.get("event") or fields.get("event_type") or "").casefold()
+                if trace and event.endswith("_started"):
+                    for key in ("lookup_key", "match_key", "scan_key"):
+                        value = fields.get(key)
+                        if isinstance(value, str) and value.strip() and value.strip().casefold() not in {"null", "none", "-"}:
+                            starts[str(trace)].add(value.strip().lower() if "@" in value else value.strip())
+                parsed_lines[line_number] = (line, fields, str(trace or ""))
+
+            observations_by_locator = collections.defaultdict(list)
+            for observation in report.observations:
+                observations_by_locator[observation.locator].append(observation)
+
+            for line_number, (line, _fields, trace) in parsed_lines.items():
+                resource_ids = set(RESOURCE_ID_RE.findall(line))
+                if not trace or not resource_ids or trace not in starts:
+                    continue
+                expected_keys = starts[trace]
+                locator = f"{report.file_path}:{line_number}"
+                for resource_id in resource_ids:
+                    for key in expected_keys:
+                        # A key that is itself a resource token belongs in
+                        # resource_id, not in the identity set (A4).
+                        if RESOURCE_ID_RE.fullmatch(key):
+                            continue
+                        matches = [
+                            observation
+                            for observation in observations_by_locator[locator]
+                            if observation.resource_id == resource_id
+                        ]
+                        if not matches or not any(key in observation.identifiers for observation in matches):
+                            violations.append((report.file_id, locator, resource_id, key))
+
+        self.assertEqual(violations, [], f"trace identity join violations: {violations}")
 
 
 if __name__ == "__main__":

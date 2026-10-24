@@ -21,6 +21,15 @@ from .result import ParserOutput
 TIMESTAMP_PREFIX_RE = re.compile(
     r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)\s+(.*)$"
 )
+BRACKETED_HEADER_RE = re.compile(
+    r"^\[(?P<level>[^\]]+)\]\s+\[(?P<service>[^\]]+)\]\s+\[(?P<trace>[^\]]+)\]\s+"
+    r"(?P<event>[A-Za-z0-9_.-]+):\s*(?P<payload>.*)$"
+)
+PIPE_HEADER_RE = re.compile(
+    r"^(?P<timestamp>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)"
+    r"\s*\|\s*(?P<level>[^|]+?)\s*\|\s*(?P<service>[^|]+?)\s*\|\s*(?P<trace>[^|]+?)"
+    r"\s*\|\s*(?P<event>[^|]+?)\s*\|\s*(?P<payload>.*)$"
+)
 KV_RE = re.compile(
     r"([A-Za-z_][A-Za-z0-9_.-]*)=(?:\"((?:\\.|[^\"])*)\"|'((?:\\.|[^'])*)'|([^\s]+))"
 )
@@ -47,6 +56,8 @@ INFRASTRUCTURE_EVENTS = frozenset(
         "thumbnail_failed",
         "checkpoint_saved",
         "lease_extended",
+        "telemetry_flushed",
+        "delivery_abandoned",
     }
 )
 
@@ -71,40 +82,101 @@ def _key_value_fields(text: str) -> dict[str, Any]:
     return fields
 
 
+def _expand_nested_message(fields: dict[str, Any]) -> dict[str, Any]:
+    """Unpack nested key/value payloads embedded in a message field."""
+
+    expanded = dict(fields)
+    pending = [expanded.get("message")]
+    seen: set[str] = set()
+    while pending and len(seen) < 8:
+        payload = pending.pop(0)
+        if not isinstance(payload, str) or not payload or payload in seen:
+            continue
+        seen.add(payload)
+        nested = _key_value_fields(payload)
+        if not nested:
+            continue
+        for key, value in nested.items():
+            if key.casefold() == "message":
+                pending.append(value)
+            else:
+                expanded[key] = value
+
+    folded = {str(key).casefold(): value for key, value in expanded.items()}
+    if not _trace_id(expanded):
+        request_id = folded.get("requestid") or folded.get("request_id")
+        if isinstance(request_id, str) and request_id.strip():
+            expanded["trace_id"] = request_id.strip()
+    if not (isinstance(expanded.get("service"), str) and expanded["service"].strip()):
+        function = folded.get("function")
+        if isinstance(function, str) and function.strip():
+            expanded["service"] = function.strip()
+    return expanded
+
+
 def _decode_line(line: str) -> tuple[dict[str, Any], datetime | None, bool]:
     """Return parsed fields, the line timestamp, and whether RFC5424 framing was seen."""
 
     content = line.strip()
     timestamp: datetime | None = None
+    pipe_header = PIPE_HEADER_RE.match(content)
+    if pipe_header:
+        header = pipe_header.groupdict()
+        timestamp = parse_observation_time(header["timestamp"])
+        fields: dict[str, Any] = {
+            "level": header["level"].strip(),
+            "service": header["service"].strip(),
+            "trace_id": header["trace"].strip(),
+            "event": header["event"].strip(),
+        }
+        fields.update(_key_value_fields(header["payload"]))
+        fields = _expand_nested_message(fields)
+        if timestamp is not None:
+            fields.setdefault("observed_at", timestamp.isoformat().replace("+00:00", "Z"))
+        return fields, timestamp, False
+
     prefix = TIMESTAMP_PREFIX_RE.match(content)
     if prefix:
         timestamp = parse_observation_time(prefix.group(1))
         content = prefix.group(2).strip()
 
-    rfc_match = RFC5424_RE.match(content)
-    is_rfc5424 = rfc_match is not None
-    if rfc_match:
-        _priority, _version, host, app, procid, msgid, structured_data, message = rfc_match.groups()
-        fields: dict[str, Any] = _key_value_fields(message)
-        fields.setdefault("_syslog_host", host)
-        fields.setdefault("_syslog_app", app)
-        fields.setdefault("_syslog_procid", procid)
-        fields.setdefault("_syslog_msgid", msgid)
-        if structured_data not in ("", "-"):
-            fields.setdefault("_syslog_structured_data", structured_data)
-        fields.setdefault("service", app)
-        if procid.startswith("tr-"):
-            fields.setdefault("trace_id", procid)
-    elif content.startswith("{"):
-        try:
-            decoded = json.loads(content)
-        except json.JSONDecodeError:
-            fields = _key_value_fields(content)
-        else:
-            fields = decoded if isinstance(decoded, dict) else {"_json_value": decoded}
+    bracketed_header = BRACKETED_HEADER_RE.match(content)
+    if bracketed_header:
+        header = bracketed_header.groupdict()
+        fields = {
+            "level": header["level"].strip(),
+            "service": header["service"].strip(),
+            "trace_id": header["trace"].strip(),
+            "event": header["event"].strip(),
+        }
+        fields.update(_key_value_fields(header["payload"]))
+        is_rfc5424 = False
     else:
-        fields = _key_value_fields(content)
+        rfc_match = RFC5424_RE.match(content)
+        is_rfc5424 = rfc_match is not None
+        if rfc_match:
+            _priority, _version, host, app, procid, msgid, structured_data, message = rfc_match.groups()
+            fields = _key_value_fields(message)
+            fields.setdefault("_syslog_host", host)
+            fields.setdefault("_syslog_app", app)
+            fields.setdefault("_syslog_procid", procid)
+            fields.setdefault("_syslog_msgid", msgid)
+            if structured_data not in ("", "-"):
+                fields.setdefault("_syslog_structured_data", structured_data)
+            fields.setdefault("service", app)
+            if procid.startswith("tr-"):
+                fields.setdefault("trace_id", procid)
+        elif content.startswith("{"):
+            try:
+                decoded = json.loads(content)
+            except json.JSONDecodeError:
+                fields = _key_value_fields(content)
+            else:
+                fields = decoded if isinstance(decoded, dict) else {"_json_value": decoded}
+        else:
+            fields = _key_value_fields(content)
 
+    fields = _expand_nested_message(fields)
     if timestamp is not None:
         fields.setdefault("observed_at", timestamp.isoformat().replace("+00:00", "Z"))
     return fields, timestamp, is_rfc5424
@@ -119,7 +191,7 @@ def _event_name(record: dict[str, Any]) -> str:
 
 
 def _trace_id(record: dict[str, Any]) -> str:
-    value = record.get("trace_id")
+    value = record.get("trace_id") or record.get("requestId") or record.get("request_id") or record.get("requestid")
     return value.strip() if isinstance(value, str) else ""
 
 
@@ -169,7 +241,7 @@ def parse_log(text: str, evidence: EvidenceFile) -> ParserOutput:
             if trace and trace not in resource_traces:
                 result.add_unrecognized(
                     f"{evidence.file_path}:{line_number}",
-                    "unmatched lookup-start line has no resource-bearing trace event",
+                    "ignored unmatched lookup-start line has no resource-bearing trace event",
                 )
             continue
 

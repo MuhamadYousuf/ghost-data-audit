@@ -1,6 +1,5 @@
 """Text extraction parser for PDF evidence using the pinned pypdf dependency."""
 
-from datetime import datetime, timezone
 from io import BytesIO
 import re
 
@@ -10,7 +9,7 @@ from ..models import EvidenceFile
 from .common import (
     identifiers_from_text,
     make_observations,
-    parse_observation_time,
+    names_from_pdf_text,
     resource_ids_from_text,
 )
 from .result import ParserOutput
@@ -26,20 +25,19 @@ HUMAN_TIME_RE = re.compile(
 )
 
 
-def _page_time(text: str) -> datetime | None:
-    for match in ISO_TIME_RE.finditer(text):
-        parsed = parse_observation_time(match.group(0))
-        if parsed is not None:
-            return parsed
-    for match in HUMAN_TIME_RE.finditer(text):
-        value = match.group(0).strip()
-        for date_format in ("%d %b %Y %H:%M:%S %Z", "%d %b %Y %H:%M %Z", "%d %b %Y", "%d %B %Y"):
-            try:
-                parsed = datetime.strptime(value, date_format)
-            except ValueError:
-                continue
-            return parsed.replace(tzinfo=timezone.utc)
-    return None
+def _document_dates(text: str) -> tuple[str, ...]:
+    matches = [
+        (match.start(), match.group(0).strip())
+        for pattern in (ISO_TIME_RE, HUMAN_TIME_RE)
+        for match in pattern.finditer(text)
+    ]
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for _, value in sorted(matches):
+        if value not in seen:
+            seen.add(value)
+            ordered.append(value)
+    return tuple(ordered)
 
 
 def parse_pdf(data: bytes, evidence: EvidenceFile) -> ParserOutput:
@@ -50,9 +48,12 @@ def parse_pdf(data: bytes, evidence: EvidenceFile) -> ParserOutput:
         text = page.extract_text() or ""
         page_texts.append(text)
         resources = resource_ids_from_text(text)
-        identifiers = identifiers_from_text(text, labeled_phone=True, include_names=True)
-        if resources or identifiers:
-            record = {"observed_at": (_page_time(text) or evidence.captured_at).isoformat()}
+        identifiers = identifiers_from_text(text, labeled_phone=True)
+        customer_names = names_from_pdf_text(text)
+        if resources or identifiers or customer_names:
+            record = {"document_dates": "; ".join(_document_dates(text))}
+            if customer_names:
+                record["customer_name"] = sorted(customer_names)[0]
             result.observations.extend(
                 make_observations(
                     record,
