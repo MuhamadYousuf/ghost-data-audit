@@ -1,0 +1,10 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+/scratch/**/output.csv
+/scratch/output.csv
+**/scratch/**/output.csv
+code.zip
+agent-trace/
