@@ -79,3 +79,56 @@ class OutputRow:
     case_id: str
     deletion_status: str
     steps: tuple[Step, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Observation:
+    file_id: str
+    file_captured_at: datetime
+    observed_at: datetime
+    system_id: str
+    resource_id: str
+    record_type: str
+    container: str
+    identifiers: frozenset[str]
+    attributes: tuple[tuple[str, str], ...]
+    locator: str
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceFileSummary:
+    file_id: str
+    file_path: str
+    format: str
+    observations: tuple[Observation, ...]
+    unrecognized: tuple[str, ...]
+    extracted_text: str = ""
+
+    @property
+    def unrecognized_count(self) -> int:
+        return len(self.unrecognized)
+
+    @property
+    def distinct_resources(self) -> frozenset[str]:
+        return frozenset(item.resource_id for item in self.observations if item.resource_id)
+
+    @property
+    def systems_seen(self) -> frozenset[str]:
+        return frozenset(item.system_id for item in self.observations if item.system_id)
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceCorpus:
+    files: tuple[EvidenceFileSummary, ...]
+
+    @property
+    def observations(self) -> tuple[Observation, ...]:
+        return tuple(observation for item in self.files for observation in item.observations)
+
+    @property
+    def pdf_text_by_file(self) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (item.file_id, item.extracted_text)
+            for item in self.files
+            if item.format == "PDF" and item.extracted_text
+        )

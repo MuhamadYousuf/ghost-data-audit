@@ -96,3 +96,66 @@ Repo Root: C:\Users\Ibrahim\OneDrive\Desktop\Hacker-Rank\hackerrank-orchestrate-
 Branch: main
 Worktree: main
 Parent Agent: none
+## [2026-10-24T20:25:53+05:00] Milestone 2 evidence reader
+
+User Prompt (verbatim, secrets redacted):
+Review of Milestone 1: accepted. Good work on the validator and in-memory corruption tests.
+Two follow-ups before starting:
+(a) Confirm your exact runtime model identifier. If it differs from the "model=GPT-6" already in log.txt, do NOT edit old entries. Append a short correction entry that states the exact model ID, and use that ID from now on. Same for tool= (exact harness name, e.g. "Codex CLI" vs "Codex desktop app").
+(b) Commit Milestone 1 now: `git add -A && git commit -m "M1: loaders, output contract validator, tests"`. Make sure .env, __pycache__ and output.csv are not committed.
+
+Keep following AGENTS.md logging and the secrets rules from my previous prompt on every turn.
+
+TASK: Milestone 2: evidence reader. Turn every evidence file into one normalized list of observations. No identity matching, no case decisions yet.
+
+1. Observation model (code/audit/models.py), frozen dataclass:
+   file_id, file_captured_at (from evidence_files.csv),
+   observed_at (record-level time if the record has one: observed_at / recorded_at / captured_at / log line timestamp / snapshot_scope / sub-snapshot captured_at; otherwise file_captured_at),
+   system_id (e.g. account_service, search_service, analytics_platform, support_platform, export_service, integration_service, backup_service, security_service, identity_service, marketing_platform, object_storage),
+   resource_id, record_type (e.g. USER_PROFILE, SEARCH_INDEX_ENTRY, ANALYTICS_PROFILE, DATA_FLOW, BACKUP_ARCHIVE, SECURITY_AUDIT_LOG, SUPPORT_MESSAGE, ACCOUNT_TOMBSTONE; empty if unknown),
+   container (table / collection / replica name, e.g. customer_profiles_primary vs customer_profiles_failover_replica, customer_data_replica_eu_west),
+   identifiers: frozenset of normalized values found in the record (emails lowercased, user_ids, 64-hex hashes lowercased, phones as written, names as written),
+   attributes: the raw state fields as a sorted tuple of (key, value) string pairs (http_status, rows, result, enabled, restore_allowed, account_status, status, message_text, etc.),
+   locator: "path:line" or "path#table:rowid" so every observation can be traced back.
+
+2. Parsers in code/audit/evidence/ (one module per format, plus a dispatcher). Detect structure from CONTENT, not from file names or file_ids:
+   - SQL: load each .sql with sqlite3 into an in-memory DB (executescript) and read every table. Handle all three shapes in the dataset: typed inventory tables + snapshot_scope; customer_data_primary / customer_data_replica_* tables with a record_json column; customer_profiles_primary / *_failover_replica. Rows found only in a replica table must remain distinguishable by container.
+   - JSON: handle every shape present (service_exports→system→list, snapshots[] with their own captured_at/data_store/collection, flat records[] with recorded_at/system/resource_id/record_type/result/subject_reference, collection reports, export jobs/manifests, connector configurations). Inspect every JSON file and make sure none is silently skipped.
+   - Logs: three styles: key=value (quoted and unquoted values), "timestamp {json}", and syslog RFC5424 with key="value". Join *_started lines that carry lookup_key / match_key / scan_key to the line with the same trace_id that carries resource_id, so the lookup key becomes an identifier of that resource. Also handle self-contained lines (record_lookup with system/resource_id/result/subject_reference; correlation_key=<hash>; matched_value=...). Ignore pure infrastructure noise (dns_cache, feature_flags, consumer_lag, ...) but count it.
+   - TXT: the handover format "- <ts> | <system> | <resource> | <TYPE> | <STATE> | <identifier>".
+   - PDF: I approve exactly one dependency, pypdf (pin the version in code/requirements.txt). Extract the raw text and emit observations only for resource IDs and identifiers you can find with regexes. Keep the full text available for a later AI extraction step.
+   - PNG: do not process yet. Register each image as an "unparsed media" entry so later milestones know it exists.
+
+3. Parser-recall guard (most important test). For each text evidence file, find every token matching
+   \b(account|search|analytics|support|export|data_flow|backup|audit_record|tombstone|marketing|object|legal_hold|cache|email_delivery)_\d+\b
+   in the raw text. Every such resource_id must appear in at least one observation from that file. The test fails and lists any missed IDs per file. Also report unrecognized lines/records per file. The target is 0, or an explicit, justified ignore rule.
+
+4. Ground-truth spot checks (code/tests/test_evidence.py), from facts visible in the files:
+   - customer_accounts_failover_replica_20260902.sql: account_005 exists only in the failover replica container, with email leila.haddad@yahoo.com.
+   - service_events_ap_south_20260915.log: analytics_9914 carries identifier 44a65154bfd8e408852578fbd76813d094d1944f255ac1769ee81ba90492f10e; account_9797 carries minjun.kim@gmail.com via the trace_id join, with http_status 404.
+   - customer_account_handover_20261001.txt: search_052 is FOUND with novak.tomasz@icloud.com; data_flow_9522 ACTIVE.
+   - customer_data_snapshot_bundle_20260917.json: account_3866 has observed_at 2026-09-17T12:00:00Z (sub-snapshot time, not file time); support_4707 message_text "[REDACTED]" with user_27.
+   - resource_lookup_trace_20260926_103856.log: data_flow_4890 enabled=true with mori.ren@gmail.com.
+   (These are format tests drawn from evidence content, not answers. Never put case_ids or expected statuses in code.)
+
+5. Add `python code/main.py --inspect-evidence` that prints, per file_id: format, observation count, distinct resources, systems seen, unrecognized count, plus totals. Deterministic ordering.
+
+6. Constraints: standard library only, except pypdf. Never modify dataset/. No hardcoded file names or file_ids in the parsing logic (tests may reference specific files). Deterministic output.
+
+7. When done: run all tests and `--inspect-evidence`, paste both outputs (the summary table is enough if long), list any evidence shapes you found that I did not describe, then commit as "M2: evidence reader and normalized observations". Do not start Milestone 3.
+
+Agent Response Summary:
+Implemented the Milestone 2 evidence reader with content-based parsers, normalized observations, inspection output, and ground checks. The full test suite passed (24 tests), evidence inspection covered all 94 files, and the resource recall guard found no missed IDs. No files under dataset/ were changed; the requested M2 commit is being created in this turn.
+
+Actions:
+* Added SQL, JSON, log, text, PDF, and PNG parsing plus the --inspect-evidence command.
+* Ran python -m unittest discover -s code/tests -v and python code/main.py --inspect-evidence.
+* Verified the resource recall guard, parser source constraints, and no dataset changes; prepared the requested M2 commit.
+
+Context:
+tool=Codex desktop app
+model=gpt-6-luna
+branch=main
+repo_root=C:\Users\Ibrahim\OneDrive\Desktop\Hacker-Rank\hackerrank-orchestrate-october26
+worktree=main
+parent_agent=none

@@ -25,6 +25,18 @@ Start your AI coding tool from the **repository root** so it automatically reads
 
 Build your solution in `code/main.py`, or use another language and document its setup and run command clearly in your README.
 
+Install the pinned evidence-reading dependency:
+
+```bash
+python -m pip install -r code/requirements.txt
+```
+
+To inspect the normalized evidence observations, run:
+
+```bash
+python code/main.py --inspect-evidence
+```
+
 Your solution must:
 
 - Read the input files from `dataset/`
