@@ -26,6 +26,21 @@ class Identity:
 
 
 @dataclass(frozen=True, slots=True)
+class IdentityProfile:
+    user_id: str
+    current_name: str
+    current_email: str
+    current_phone: str
+    current_email_hash: str
+    names: frozenset[str]
+    emails: frozenset[str]
+    normalized_emails: frozenset[str]
+    phones: frozenset[str]
+    normalized_phones: frozenset[str]
+    email_hashes: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
 class AuditLogEntry:
     audit_id: str
     user_id: str
@@ -93,6 +108,17 @@ class Observation:
     identifiers: frozenset[str]
     attributes: tuple[tuple[str, str], ...]
     locator: str
+
+
+@dataclass(frozen=True, slots=True)
+class LinkedResource:
+    system_id: str
+    resource_id: str
+    record_type: str
+    matched_identifier: str
+    link_kind: str
+    supporting_observation_locators: tuple[str, ...]
+    supporting_activity_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -37,6 +37,8 @@ To inspect the normalized evidence observations, run:
 python code/main.py --inspect-evidence
 ```
 
+To explain a sample or evaluation case's resolved identity and linked resources, run python code/main.py --explain-case CASE_ID.
+
 Your solution must:
 
 - Read the input files from `dataset/`

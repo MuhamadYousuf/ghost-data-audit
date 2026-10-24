@@ -159,3 +159,62 @@ branch=main
 repo_root=C:\Users\Ibrahim\OneDrive\Desktop\Hacker-Rank\hackerrank-orchestrate-october26
 worktree=main
 parent_agent=none
+## [2026-10-24T20:51:09+05:00] M2 corrections and M3 identity linking
+
+User Prompt (verbatim, secrets redacted):
+Review of Milestone 2: good structure, and the recall guard is a good idea. But my independent check of the observations found bugs that the current tests do not catch. Fix them first (Part A), commit, then do Milestone 3 (Part B). Keep following AGENTS.md logging and the secrets rules on every turn.
+
+PART A: M2 fixes (each one gets a regression test that fails before the fix and passes after it)
+
+A1. Nested-message log style is not unpacked. Files such as evidence/logs/cloud_runtime_export_us_west_20260608.log use:
+    `<ts> requestId=tr-... level=... function=<service> message="instance=\"...\" resource_id=\"...\" event=\"...\" ..."`
+    The inner key-values stay inside `message`, so resource_id, rows, http_status, enabled, matched_value etc. are never parsed, and `requestId` is not treated as the trace id. Result: e.g. account_4331 (file evidence_25) has no identifier and its http_status is unreadable; ~146 observations have an empty system_id. Fix: recursively unpack escaped key=value payloads inside message fields, treat requestId as a trace-id alias, map `function` to the service, and treat subject_key / correlation_key / matched_value / lookup_key / match_key / scan_key as identifier-carrying keys.
+    Regression test: in evidence_25, account_4331 carries cchukwu7021@gmail.com (via the requestId join) and http_status=404; no observation in that file has an empty system_id.
+
+A2. Support attachments are mis-typed as SUPPORT_MESSAGE. Any support record from an attachment event (attachment_pii_scan, attachment_scan_*, or a record with file / file_name / attachment fields) must be record_type SUPPORT_ATTACHMENT. Message scans and conversation records stay SUPPORT_MESSAGE. This decides DELETE vs REDACT under deletion_rules.csv, so it matters.
+    Regression test: evidence_01 support_9538 and evidence_12 support_2315 are SUPPORT_ATTACHMENT; evidence_02 support_1034 is SUPPORT_MESSAGE.
+
+A3. Replica/component services must map to their canonical system. support_replica and attachment_preview → support_platform. Generalize this into one alias table in common.py: a replica or sub-component is recorded in `container`, never in system_id. Also cross-check against the manifest `origin` where it names a system.
+    Regression test: every evidence_61 observation has system_id support_platform; the canonical system set across the corpus contains no *_replica names.
+
+A4. PDF and junk identifiers:
+    - For PDF and PNG observations, observed_at = file captured_at. Dates printed inside a document (order dates, issue dates) go into attributes, never into observed_at.
+    - Identifiers may only be: emails, user_<n>, 64-hex hashes, phone numbers, or person names taken from an explicit name field (full_name, name, display_name, requester_name, "Customer <Name>" in PDFs). Drop sentinel values such as "no direct identifier", "null", "none", "[REDACTED]", and layout fragments ("COMPLIANCE JOURNAL", anything containing a newline).
+    Regression test: no identifier in the corpus contains a newline or equals a sentinel; evidence_18 observations have observed_at 2026-07-18T11:00:00Z.
+
+A5. Add an identity-join guard test: for every log file, every resource-bearing line whose trace id (trace_id or requestId) matches a *_started line with a non-null key must end up with that key in its identifiers. List every violation.
+
+Then run all tests and `--inspect-evidence` (the empty-system count must drop to only media/scope rows). Commit as "M2 fixes: nested log payloads, attachment typing, system aliases, PDF time".
+
+PART B: Milestone 3, identity resolution and resource linking (no decisions yet)
+
+B1. code/audit/identity.py:
+    - IdentityProfile per user_id: current name/email/phone/email_hash plus every historical value from user_audit_log.csv (email, email_hash, phone, old and new). Add sha256(lowercase(email)) for every email the user has ever had. Normalize emails to lowercase and phones to digits only, but also keep the original.
+    - resolve_request(request) → exactly one user_id by case-insensitive exact match against current or historical emails. Raise a clear error if there are zero or several matches, never guess.
+B2. code/audit/linking.py, linking per case under a strict time rule: only observations with file_captured_at <= audit_at AND observed_at <= audit_at may be used.
+    - Strong links: exact match on email (any case), user_id, email hash, or normalized phone.
+    - Activity links: LINK_RESOURCE_IDENTITY rows in system_activity.csv with event_time <= audit_at. Parse the linked email and user_id out of `details`.
+    - Name-only matches are "weak". Record them but never use them alone.
+    - No fuzzy or partial matching. "g.silva76.jr@gmail.com" must NOT link to g.silva76@gmail.com.
+    - Output per case: LinkedResource(system_id, resource_id, record_type, matched_identifier, link_kind, supporting observation locators).
+B3. CLI: `python code/main.py --explain-case <case_id>` prints the resolved profile and every linked resource with its link reason and file/locator. Works for sample and evaluation cases.
+B4. Measurement, no hardcoding: a dev-only script `code/evaluation/link_recall.py` that, for the 32 sample cases, compares linked resource_ids with the resource_ids in dataset/sample_output.csv and prints recall, precision and every miss and extra, with a reason (not in any evidence before audit_at / only in activity / identifier mismatch / ...). Do NOT tune code by naming specific cases. Fix only general causes, and tell me which misses you believe are not derivable from participant data.
+B5. Tests: all 518 evaluation requests and 32 samples resolve to exactly one user; the decoy test above; the time-cutoff test (a resource seen only in a file captured after audit_at is not linked); hashed-old-email linking (sample request minjun.kim@gmail.com links analytics_9914 through the sha256 of the historical email).
+
+When done: paste the test output, the link_recall summary (overall numbers plus the miss list), and anything surprising. Commit as "M3: identity resolution and time-bounded resource linking". Do not start Milestone 4.
+
+Agent Response Summary:
+Committed the M2 parser corrections, then implemented historical identity profiles, exact time-bounded resource linking, the explain-case CLI, and sample link-recall reporting. All 39 tests passed; the sample comparison found 73 true links from 111 expected (65.77% recall) and 73 from 76 predicted strong links (96.05% precision).
+
+Actions:
+* Created M2 fixes commit 672096a after regression tests reproduced and then cleared the reported parser failures.
+* Ran the full unittest suite, evidence inspection, sample link-recall script, and explain-case for sample and evaluation requests.
+* Verified no dataset changes; prepared the requested M3 commit.
+
+Context:
+tool=Codex desktop app
+model=gpt-6-luna
+branch=main
+repo_root=C:\Users\Ibrahim\OneDrive\Desktop\Hacker-Rank\hackerrank-orchestrate-october26
+worktree=main
+parent_agent=none

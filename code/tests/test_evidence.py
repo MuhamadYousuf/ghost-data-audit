@@ -251,7 +251,7 @@ class TestEvidenceParsing(unittest.TestCase):
                     identifier.strip() == identifier
                     and identifier not in explicit_names
                     and 7 <= len(phone_digits) <= 15
-                    and bool(re.search(r"[+() ./-]", identifier))
+                    and (identifier.isdigit() or bool(re.search(r"[+() ./-]", identifier)))
                 )
                 if (
                     "\n" in identifier
